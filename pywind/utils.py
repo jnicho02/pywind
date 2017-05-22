@@ -104,7 +104,23 @@ def valid_date(dtstr):
     try:
         return datetime.strptime(dtstr, "%Y-%m-%d").date()
     except ValueError:
-        raise argparse.ArgumentTypeError("Not a valid date: '{0}'.".format(dtstr))
+        raise argparse.ArgumentTypeError("Not a valid date: '{0}'. Should be in format YYYY-MM-DD".format(dtstr))
+
+
+def valid_time(dtstr):
+    """ Parse a string into a date using the YYYY-MM-DD format. Used by the
+    :func:`commandline_parser` function.
+
+    :param dtstr: Date string to be parsed
+    :returns: Valid date
+    :rtype: :class:`datetime.date`
+    :raises: :exc:`argparse.ArgumentTypeError` if the date string is not formatted as
+             YYYY-MM-DD
+    """
+    try:
+        return datetime.strptime(dtstr, "%H:%M").time()
+    except ValueError:
+        raise argparse.ArgumentTypeError("Not a valid time: '{0}'. Should be in format HH:MM".format(dtstr))
 
 
 def commandline_parser(help_text, epilog=None):
@@ -124,9 +140,15 @@ def commandline_parser(help_text, epilog=None):
                         help='Enable debugging of requests')
     parser.add_argument('--log-filename', action='store', help='Filename to write logging to')
     parser.add_argument('--date', type=valid_date, help='Date. (yyyy-mm-dd format)')
+    parser.add_argument('--fromdate', type=valid_date, help='Date. (yyyy-mm-dd format)')
+    parser.add_argument('--todate', type=valid_date, help='Date. (yyyy-mm-dd format)')
+    parser.add_argument('--fromtime', type=valid_time, help='24 hour time. (HH:MM)')
+    parser.add_argument('--totime', type=valid_time, help='24 hour time. (HH:MM)')
+    parser.add_argument('--unit-type', help='Elexon Unit Type (only one type can be given)')
     parser.add_argument('--year', type=int, help='Year (used for Elexon)')
     parser.add_argument('--month', type=int, help='Month (used for Elexon)')
     parser.add_argument('--period', type=int, help='Period (format is YYYYMM)')
+    parser.add_argument('--all-periods', action='store_true', help='Get data for all available periods')
     parser.add_argument('--scheme', choices=['REGO', 'RO'], help='Ofgem Scheme')
     parser.add_argument('--export', choices=['csv', 'xml', 'xlsx'], help='Data Export Format')
     parser.add_argument('--output', help='Export filename')
@@ -138,6 +160,17 @@ def commandline_parser(help_text, epilog=None):
     parser.add_argument('--apikey', help='API Key (Elexon only)')
     parser.add_argument('-v', '--version', action='store_true', help='Show version number')
     return parser
+
+
+def args_get_datetime(args):
+    if args.fromdate and args.fromtime:
+        args.fromdatetime = datetime.combine(args.fromdate, args.fromtime)
+    else:
+        args.fromdatetime = None
+    if args.todate and args.totime:
+        args.todatetime = datetime.combine(args.todate, args.totime)
+    else:
+        args.todatetime = None
 
 
 def parse_response_as_xml(request):
@@ -182,7 +215,20 @@ def multi_level_get(the_dict, key, default=None):
     return here.get(lvls[-1], default)
 
 
-def map_xml_to_dict(xml_node, mapping):
+def xml_attr_or_element(xml_node, name):
+    """ Attempt to get the value of name from the xml_node. This could be an attribute or
+        a child element.
+    """
+    attr_val = xml_node.get(name, None)
+    if attr_val is not None:
+        return attr_val.encode('utf-8').strip()
+    for child in xml_node.getchildren():
+        if child.tag == name:
+            return child.text.encode('utf-8').strip()
+    return None
+
+
+def map_xml_to_dict(xml_node, mapping=None):
     """
     Given an XML node, create a dict using the mapping of attributes/elements supplied.
 
@@ -190,6 +236,7 @@ def map_xml_to_dict(xml_node, mapping):
         - xml attribute
         - key for dict (optional)
         - type of data expected (optional)
+        - default value for the mapping
 
     If the key name is not supplied, the lower cased xml attribute will be used.
     If the type is not given it will be assumed to be a string.
@@ -200,17 +247,35 @@ def map_xml_to_dict(xml_node, mapping):
     :rtype: dict
     """
     rv_dict = {}
-    for mapp in mapping:
-        val = xml_node.get(mapp[0], None)
-        key = mapp[1] if len(mapp) > 1 and mapp[1] != '' else mapp[0].lower()
-        if val is not None:
-            val = val.strip().encode('utf-8')
+
+    if mapping is None:
+        for child in xml_node.iterchildren():
+            key = child.tag.lower()
+            val = _convert_type(child.text.strip().encode('utf-8'), 'str')
             if len(val) == 0:
-                val = None if len(mapp) < 4 else mapp[3]
+                val = None
+            rv_dict[key] = val
+    else:
+        for mapp in mapping:
+            if isinstance(mapp, (list, set, tuple)):
+                xml_name = mapp[0]
+                dict_key = mapp[1] if len(mapp) > 1 and mapp[1] != '' else None
+                data_typ = mapp[2] if len(mapp) > 2 and mapp[2] != '' else None
+                dflt = mapp[3] if len(mapp) > 3 else None
             else:
-                typ = mapp[2] if len(mapp) > 2 and mapp[2] != '' else 'str'
-                val = _convert_type(val, typ)
-        rv_dict[key] = val
+                xml_name = mapp
+                dict_key = None
+                data_typ = None
+                dflt = None
+
+            val = xml_attr_or_element(xml_node, xml_name)
+            dict_key = dict_key or xml_name.lower()
+            if val is not None:
+                if len(val) == 0:
+                    val = dflt
+                else:
+                    val = _convert_type(val, data_typ or 'str')
+            rv_dict[dict_key] = val
     return rv_dict
 
 
@@ -223,7 +288,7 @@ def _convert_type(val, typ):
     :return: Converted value
     :raises: ValueError
     """
-    if sys.version_info >= (3,0) and isinstance(val, bytes):
+    if sys.version_info >= (3, 0) and isinstance(val, bytes):
         val = val.decode()
     if typ in ['int', 'float'] and isinstance(val, str):
         val = val.replace(',', '')
@@ -341,5 +406,4 @@ class StdoutFormatter(object):
             else:
                 vals.append(arg)
             col += 1
-
         return self.formatter().format(*vals)
