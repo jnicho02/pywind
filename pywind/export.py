@@ -49,7 +49,7 @@ def export_to_file(args, obj):
     """
     fmt = (args.export or 'xml').lower()
     if fmt.lower() not in ['xml', 'csv', 'xlsx']:
-        print("Format must be xml or csv, not {}".format(fmt))
+        print("Format must be xml, xlsx or csv, not {}".format(fmt))
         sys.exit(0)
     if args.output is None:
         fnn = obj.__class__.__name__
@@ -124,7 +124,8 @@ def _order(info):
     """ Create the order and titles for CSV export from an information dict. """
     rv_list = [(0, 'Record Type')]
     for key in info.keys():
-        title = " ".join([part.title() for part in key[1:].split('_')])
+        key_title = key[1:] if key.startswith('@') else key
+        title = " ".join([part.title() for part in key_title.split('_')])
         rv_list.append((key, title))
     return rv_list
 
